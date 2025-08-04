@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import pymongo
 from datetime import datetime
 import json
+import tensorflow as tf
 
 load_dotenv()
 
@@ -24,6 +25,21 @@ db = client.data_breach_analysis
 model = None
 label_encoders = {}
 scaler = None
+tf_model = None
+industry_encoder = None
+type_encoder = None
+tf_scaler = None
+
+def load_tf_model():
+    global tf_model, industry_encoder, type_encoder, tf_scaler
+    try:
+        tf_model = tf.keras.models.load_model("model/tf_breach_predictor.h5")
+        industry_encoder = joblib.load("model/org_encoder.joblib")
+        type_encoder = joblib.load("model/type_encoder.joblib")
+        tf_scaler = joblib.load("model/tf_scaler.joblib")
+        print("TensorFlow model and encoders loaded.")
+    except Exception as e:
+        print("Failed to load TensorFlow model:", e)
 
 def load_or_train_model():
     """Load existing model or train a new one"""
@@ -203,6 +219,36 @@ def health_check():
     """Health check endpoint"""
     return jsonify({'status': 'healthy', 'service': 'ML Prediction Service'})
 
+
+@app.route('/api/tfpredict', methods=['POST'])
+def tf_predict():
+    try:
+        data = request.json
+        org = data.get('organization')
+        breach_type = data.get('breachType')
+        year = int(data.get('year', datetime.now().year))
+
+        if not org or not breach_type:
+            return jsonify({'error': 'Missing organization or breachType'}), 400
+
+        if org not in industry_encoder.classes_:
+            industry_encoder.classes_ = np.append(industry_encoder.classes_, org)
+        if breach_type not in type_encoder.classes_:
+            type_encoder.classes_ = np.append(type_encoder.classes_, breach_type)
+
+        org_encoded = industry_encoder.transform([org])[0]
+        type_encoded = type_encoder.transform([breach_type])[0]
+
+        X = np.array([[org_encoded, type_encoded, year]])
+        X[:, 2:] = tf_scaler.transform(X[:, 2:])  
+
+        y_pred_log = tf_model.predict(X, verbose=0)[0][0]
+        predicted = int(np.expm1(y_pred_log))
+
+        return jsonify({'predictedRecords': predicted})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/predict', methods=['POST'])
 def predict():
     """Predict breach risk endpoint"""
@@ -236,6 +282,7 @@ def retrain_model():
 
 if __name__ == '__main__':
     load_or_train_model()
-    
+    load_tf_model()
+
     port = int(os.getenv('ML_PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=True) 
